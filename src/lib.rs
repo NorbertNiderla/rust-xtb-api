@@ -1,38 +1,42 @@
-use std::{io::{Read, Write}, net::TcpStream, thread, time::Duration};
+use std::time::Duration;
+use async_std::io::{ReadExt, WriteExt};
+use async_std::{task, net::TcpStream};
 use chrono::NaiveDateTime;
-use native_tls::{TlsConnector, TlsStream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use log::debug;
 use rust_decimal::Decimal;
+use async_tls::TlsConnector;
+use async_tls::client::TlsStream;
 
 const DEFAULT_XAPI_ADDRESS: &'static str = "xapi.xtb.com";
 const DEFAULT_XAPI_PORT: u16 = 5124;    
 // const DEFUALT_XAPI_STREAMING_PORT: u16 = 5125;
-// pub const XTB_PERIOD_M1: u32 = 1;
-// pub const XTB_PERIOD_M5: u32 = 5;
-// pub const XTB_PERIOD_M15: u32 = 15;
-// pub const XTB_PERIOD_M30: u32 = 30;
-// pub const XTB_PERIOD_H1: u32 = 60;
-// pub const XTB_PERIOD_H4: u32 = 240;
-pub const XTB_PERIOD_D1: u32 = 1440;
-// pub const XTB_PERIOD_W1: u32 = 10080;
-// pub const XTB_PERIOD_MN1: u32 = 43200;
 
 fn xtb_create_timestamp(datetime: NaiveDateTime) -> i64 {
     datetime.timestamp() * 1000
 }
 
+pub enum XtbPeriod {
+    M1 = 1,
+    M5 = 5,
+    M15 = 15,
+    M30 = 30,
+    H1 = 60,
+    H4 = 240,
+    D1 = 1440,
+    W1 = 10080,
+    MN1 = 43200
+}
+
 #[derive(Debug)]
 pub enum XtbError {
     FailedToSendCommand,
-    FailedToParseOutput,
-    UnexpectedOutput,
-    CommandFailed {
-        error_description: String,
-    },
-    NetworkError,
-    ConnectionNotOpened
+    SendTimeout,
+    FailedToSerializeCommand,
+    FailedToReceive,
+    FailedToDecodeFromUtf8,
+    FailedToParseOutput
 }
 
 #[allow(non_snake_case)]
@@ -65,13 +69,13 @@ struct XtbLoginArguments {
 }
 
 #[derive(Serialize)]
-struct XtbLoginCommand {
+pub struct XtbLoginCommand {
     command: String,
     arguments: XtbLoginArguments,
 }
 
 impl XtbLoginCommand {
-    fn new(user_id: &str, password: &str) -> Self {
+    pub fn new(user_id: &str, password: &str) -> Self {
         XtbLoginCommand { 
             command: "login".to_string(), 
             arguments: XtbLoginArguments {
@@ -80,26 +84,16 @@ impl XtbLoginCommand {
             } 
         }
     }
-
-    fn new_json(user_id: &str, password: &str) -> String {
-        let login_command = XtbLoginCommand::new(user_id, password);
-        serde_json::to_string(&login_command).unwrap()
-    }
 }
 
 #[derive(Serialize)]
-struct XtbLogoutCommand {
+pub struct XtbLogoutCommand {
     command: String
 }
 
 impl XtbLogoutCommand {
-    fn new() -> Self {
+    pub fn new() -> Self {
         XtbLogoutCommand { command: "logout".to_string() }
-    }
-
-    fn new_json() -> String {
-        let logout_command: XtbLogoutCommand = XtbLogoutCommand::new();
-        serde_json::to_string(&logout_command).unwrap()
     }
 }
 
@@ -124,34 +118,28 @@ struct GetLastChartRequestArguments {
 }
 
 #[derive(Serialize)]
-struct XtbGetLastChartRequestCommand {
+pub struct XtbGetLastChartRequestCommand {
     command: String,
     arguments: GetLastChartRequestArguments
 }
 
 impl XtbGetLastChartRequestCommand {
-    fn new(symbol: &str, period: u32, start_datetime: NaiveDateTime) -> XtbGetLastChartRequestCommand {
+    pub fn new(symbol: &str, period: XtbPeriod, start_datetime: NaiveDateTime) -> XtbGetLastChartRequestCommand {
         XtbGetLastChartRequestCommand { 
             command: "getChartLastRequest".to_string(), 
             arguments: GetLastChartRequestArguments {
                 info: ChartLastInfoRecord {
-                    period: period,
+                    period: period as u32,
                     start: xtb_create_timestamp(start_datetime),
                     symbol: symbol.to_string(),
                 }
             } 
         }
     }
-
-    fn new_json(symbol: &str, period: u32, start_datetime: NaiveDateTime) -> String {
-        let command = XtbGetLastChartRequestCommand::new(symbol, period, start_datetime);
-        serde_json::to_string(&command).unwrap()
-    }
 }
 
 #[allow(non_snake_case)]
-#[derive(Deserialize)]
-#[derive(Debug)]
+#[derive(Deserialize, Debug)]
 pub struct RateInfoRecord {
     pub close: Decimal,
     pub ctm: i64,
@@ -163,15 +151,30 @@ pub struct RateInfoRecord {
 }
 
 #[allow(non_snake_case)]
-#[derive(Deserialize)]
-#[derive(Debug)]
+#[derive(Deserialize, Debug)]
 pub struct GetLastChartRequestReturnData {
     pub digits: u8,
     pub rateInfos: Vec<RateInfoRecord>
 }
 
+impl GetLastChartRequestReturnData {
+    pub fn new(response: &XtbOutput) -> Option<GetLastChartRequestReturnData> {
+        assert!(matches!(response, XtbOutput::Success { status: _, returnData: _ }));
+        
+        match response {
+            XtbOutput::Success { status: _, returnData } => {
+                match serde_json::from_value(returnData.clone()) {
+                    Ok(chart_data) => Option::Some(chart_data),
+                    Err(_) => Option::None,
+                }
+            },
+            _ => return Option::None,
+        }
+    }
+}
+
 #[derive(Serialize)]
-struct XtbGetAllSymbolsCommand {
+pub struct XtbGetAllSymbolsCommand {
     command: String
 }
 
@@ -181,33 +184,26 @@ impl XtbGetAllSymbolsCommand {
             command: "getAllSymbols".to_string()
         }
     }
-
-    fn new_json() -> String {
-        let command = XtbGetAllSymbolsCommand::new();
-        serde_json::to_string(&command).unwrap()
-    }
 }
 
-/// 
-/// Xtb API implementation.
-/// 
-pub struct Xtb {
-    user_id: String,
-    password: String,
-    tcp_client: Option<TcpStream>,
-    tls_connector: TlsConnector,
-    tls_client: Option<TlsStream<TcpStream>>,
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum XtbCommand {
+    Login(XtbLoginCommand),
+    Logout(XtbLogoutCommand),
+    GetLastChartRequest(XtbGetLastChartRequestCommand),
+    GetAllSymbols(XtbGetAllSymbolsCommand),
 }
 
-impl Xtb {
-    fn send(&mut self, command: &String) -> Result<(), XtbError> {
-        if self.tls_client.is_none() {
-            return Err(XtbError::ConnectionNotOpened);
-        }
+pub struct XtbConnection {
+    tls_client: TlsStream<TcpStream>
+}
 
-        thread::sleep(Duration::from_millis(200));
+impl XtbConnection {
+    async fn send(&mut self, command: &String) -> Result<(), XtbError> {
+        task::sleep(Duration::from_millis(200)).await;
 
-        match self.tls_client.as_mut().unwrap().write_all(command.as_bytes()) {
+        match self.tls_client.write_all(command.as_bytes()).await {
             Ok(_) => {
                 debug!("Sent: {}.", command);
                 Ok(())
@@ -215,19 +211,23 @@ impl Xtb {
             Err(_) => Err(XtbError::FailedToSendCommand),
         }
     }
-    
-    fn receive_output(&mut self) -> Result<XtbOutput, XtbError> {
-        if self.tls_client.is_none() {
-            return Err(XtbError::ConnectionNotOpened);
-        }
 
+    async fn receive_output(&mut self) -> Result<XtbOutput, XtbError> {
         let mut received_buffer: [u8; 2048] = [0; 2048];
         let mut received_string  = String::new();
     
         loop {
-            let read_bytes = self.tls_client.as_mut().unwrap().read(&mut received_buffer).unwrap();
+            let read_bytes;
+
+            match self.tls_client.read(&mut received_buffer).await {
+                Ok(recv) => read_bytes = recv,
+                Err(_) => return Err(XtbError::FailedToReceive),
+            }
     
-            received_string.push_str(std::str::from_utf8(&received_buffer[..read_bytes]).unwrap());
+            match std::str::from_utf8(&received_buffer[..read_bytes]) {
+                Ok(message) => received_string.push_str(message),
+                Err(_) => return Err(XtbError::FailedToDecodeFromUtf8),
+            }
     
             if read_bytes > 2 {
                 if received_buffer[read_bytes - 2] == b'\n' && received_buffer[read_bytes - 1] == b'\n' {
@@ -240,110 +240,73 @@ impl Xtb {
     
         debug!("Received: {}.", received_string);
         parse_xtb_output_json(&received_string)
-    } 
-
-    pub fn new(user_id: &str, password: &str) -> Self {
-        Xtb { 
-            user_id: user_id.to_string(), 
-            password: password.to_string(), 
-            tls_connector: TlsConnector::new().expect("Failed to create Tls connector."), 
-            tls_client: Option::None,
-            tcp_client: Option::None,
-        }
     }
 
-    pub fn connect(&mut self) -> Result<(), XtbError> {
-        match TcpStream::connect((DEFAULT_XAPI_ADDRESS, DEFAULT_XAPI_PORT)) {
-            Ok(tcp_client) => self.tcp_client = Option::Some(tcp_client),
-            Err(_) => return Err(XtbError::NetworkError),
-        }
-        
-        match self.tls_connector.connect(DEFAULT_XAPI_ADDRESS, self.tcp_client.as_mut().unwrap().try_clone().unwrap()) {
-            Ok(tls_client) => self.tls_client = Option::Some(tls_client),
-            Err(_) => return Err(XtbError::NetworkError),
-        }
-
-        Ok(())
-    }
-
-    pub fn login(&mut self) -> Result<XtbOutput, XtbError> {
-        if self.tls_client.is_none() {
-            return Err(XtbError::ConnectionNotOpened);
-        }
-
-        let login_command: String = XtbLoginCommand::new_json(&self.user_id, &self.password);
-        self.send(&login_command)?;
-        self.receive_output()
-    }
-    
-    pub fn logout(&mut self) -> Result<XtbOutput, XtbError> {
-        if self.tls_client.is_none() {
-            return Err(XtbError::ConnectionNotOpened);
-        }
-
-        let logout_command: String = XtbLogoutCommand::new_json();
-        self.send(&logout_command)?;
-        self.receive_output()
-    }
-
-    pub fn get_last_chart_request(&mut self, symbol: &str, period: u32, start_datetime: NaiveDateTime) -> Result<GetLastChartRequestReturnData, XtbError> {
-        if self.tls_client.is_none() {
-            return Err(XtbError::ConnectionNotOpened);
-        }
-
-        let get_last_chart_request_command = XtbGetLastChartRequestCommand::new_json(symbol, period, start_datetime); 
-        self.send(&get_last_chart_request_command)?;
-        let output: XtbOutput = self.receive_output()?;
-    
-        match output {
-            XtbOutput::Success { status: _, returnData } => {
-                Ok(serde_json::from_value(returnData).unwrap())
-            },
-            XtbOutput::Fail { status: _, errorCode: _, errorDescr } => {
-                Err(XtbError::CommandFailed { error_description: errorDescr })
-            },
-            _ => panic!("Unexpected Xtb output."),
-        }
-    }
-    
-    pub fn xtb_get_all_symbols(&mut self) -> Result<Vec<String>, XtbError> {
-        if self.tls_client.is_none() {
-            return Err(XtbError::ConnectionNotOpened);
-        }
-
-        self.send(&XtbGetAllSymbolsCommand::new_json())?;
-        let output: XtbOutput = self.receive_output()?;
-    
-        let mut symbols: Vec<String> = Vec::new();
-    
-        match output {
-            XtbOutput::Success { status: _, returnData } => {
-                match returnData {
-                    Value::Array(array) => {
-                        for element in array {
-                            match element {
-                                Value::Object(symbol_data) => {
-                                    match symbol_data.get("symbol") {
-                                        Some(data) => {
-                                            match data {
-                                                Value::String(value) => symbols.push(value.clone()),
-                                                _ => return Err(XtbError::UnexpectedOutput),
-                                            }
-                                        },
-                                        None => return Err(XtbError::UnexpectedOutput),
-                                    }
-                                    
-                                },
-                                _ => return Err(XtbError::UnexpectedOutput),
-                            }
-                        }
-                        return Ok(symbols);
-                    },
-                    _ => Err(XtbError::UnexpectedOutput),
+    pub async fn new() -> Option<Self> {
+        match TcpStream::connect((DEFAULT_XAPI_ADDRESS, DEFAULT_XAPI_PORT)).await {
+            Ok(tcp_client) => {
+                let tls_connector = TlsConnector::new();
+                match tls_connector.connect(DEFAULT_XAPI_ADDRESS, tcp_client).await {
+                    Ok(tls_client) => return Option::Some(XtbConnection { tls_client: tls_client }),
+                    Err(_) => return Option::None,
                 }
             },
-            XtbOutput::Fail { status: _, errorCode: _, errorDescr } => return Err(XtbError::CommandFailed { error_description: errorDescr }),
-            _ => Err(XtbError::UnexpectedOutput),
+            Err(_) => return Option::None,
         }
     }
+
+    pub async fn issue_command(&mut self, command: &XtbCommand) -> Result<XtbOutput, XtbError> {
+        let json;
+        match serde_json::to_string(command) {
+            Ok(command_json) => json = command_json,
+            Err(_) => return Err(XtbError::FailedToSerializeCommand),
+        }
+
+        println!("{}", json);
+
+        self.send(&json).await?;
+        self.receive_output().await
+    }
 }
+    
+//     pub fn xtb_get_all_symbols(&mut self) -> Result<Vec<String>, XtbError> {
+//         if self.tls_client.is_none() {
+//             return Err(XtbError::ConnectionNotOpened);
+//         }
+
+//         self.send(&XtbGetAllSymbolsCommand::new_json())?;
+//         let output: XtbOutput = self.receive_output()?;
+    
+//         let mut symbols: Vec<String> = Vec::new();
+    
+//         match output {
+//             XtbOutput::Success { status: _, returnData } => {
+//                 match returnData {
+//                     Value::Array(array) => {
+//                         for element in array {
+//                             match element {
+//                                 Value::Object(symbol_data) => {
+//                                     match symbol_data.get("symbol") {
+//                                         Some(data) => {
+//                                             match data {
+//                                                 Value::String(value) => symbols.push(value.clone()),
+//                                                 _ => return Err(XtbError::UnexpectedOutput),
+//                                             }
+//                                         },
+//                                         None => return Err(XtbError::UnexpectedOutput),
+//                                     }
+                                    
+//                                 },
+//                                 _ => return Err(XtbError::UnexpectedOutput),
+//                             }
+//                         }
+//                         return Ok(symbols);
+//                     },
+//                     _ => Err(XtbError::UnexpectedOutput),
+//                 }
+//             },
+//             XtbOutput::Fail { status: _, errorCode: _, errorDescr } => return Err(XtbError::CommandFailed { error_description: errorDescr }),
+//             _ => Err(XtbError::UnexpectedOutput),
+//         }
+//     }
+// }

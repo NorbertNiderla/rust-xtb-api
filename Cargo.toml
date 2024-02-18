@@ -1,11 +1,13 @@
 [package]
 name = "rust_xtb_api"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+async-std = { version = "1.12", features = ["attributes"] }
+async-tls = "0.13"
 serde = { version = "1.0.196", features = ["derive"] }
 serde_json = "1.0.113"
 native-tls = "0.2.11"
