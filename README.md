@@ -1,6 +1,9 @@
 # rust_xtb_api
 XTB API in Rust.
 
+# Todo
+* At this moment API is connecting only to real accounts, it should have option to connect to demo server.
+
 # Example
 ```rust
 let mut xtb = XtbConnection::new().await.expect("Failed to connect to Xtb");

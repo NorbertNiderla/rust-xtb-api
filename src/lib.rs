@@ -11,7 +11,7 @@ use async_tls::client::TlsStream;
 
 const DEFAULT_XAPI_ADDRESS: &'static str = "xapi.xtb.com";
 const DEFAULT_XAPI_PORT: u16 = 5124;    
-// const DEFUALT_XAPI_STREAMING_PORT: u16 = 5125;
+const DEFUALT_XAPI_STREAMING_PORT: u16 = 5125;
 
 fn xtb_create_timestamp(datetime: NaiveDateTime) -> i64 {
     datetime.timestamp() * 1000
@@ -118,14 +118,14 @@ struct GetLastChartRequestArguments {
 }
 
 #[derive(Serialize)]
-pub struct XtbGetLastChartRequestCommand {
+pub struct XtbGetChartLastRequestCommand {
     command: String,
     arguments: GetLastChartRequestArguments
 }
 
-impl XtbGetLastChartRequestCommand {
-    pub fn new(symbol: &str, period: XtbPeriod, start_datetime: NaiveDateTime) -> XtbGetLastChartRequestCommand {
-        XtbGetLastChartRequestCommand { 
+impl XtbGetChartLastRequestCommand {
+    pub fn new(symbol: &str, period: XtbPeriod, start_datetime: NaiveDateTime) -> XtbGetChartLastRequestCommand {
+        XtbGetChartLastRequestCommand { 
             command: "getChartLastRequest".to_string(), 
             arguments: GetLastChartRequestArguments {
                 info: ChartLastInfoRecord {
@@ -152,13 +152,13 @@ pub struct RateInfoRecord {
 
 #[allow(non_snake_case)]
 #[derive(Deserialize, Debug)]
-pub struct GetLastChartRequestReturnData {
+pub struct ChartLastData {
     pub digits: u8,
     pub rateInfos: Vec<RateInfoRecord>
 }
 
-impl GetLastChartRequestReturnData {
-    pub fn new(response: &XtbOutput) -> Option<GetLastChartRequestReturnData> {
+impl ChartLastData {
+    pub fn new(response: &XtbOutput) -> Option<ChartLastData> {
         assert!(matches!(response, XtbOutput::Success { status: _, returnData: _ }));
         
         match response {
@@ -191,7 +191,7 @@ impl XtbGetAllSymbolsCommand {
 pub enum XtbCommand {
     Login(XtbLoginCommand),
     Logout(XtbLogoutCommand),
-    GetLastChartRequest(XtbGetLastChartRequestCommand),
+    GetChartLastRequest(XtbGetChartLastRequestCommand),
     GetAllSymbols(XtbGetAllSymbolsCommand),
 }
 
