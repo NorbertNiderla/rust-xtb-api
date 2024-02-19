@@ -31,6 +31,7 @@ pub enum XtbPeriod {
 
 #[derive(Debug)]
 pub enum XtbError {
+    FailedToConnect,
     FailedToSendCommand,
     SendTimeout,
     FailedToSerializeCommand,
@@ -242,16 +243,16 @@ impl XtbConnection {
         parse_xtb_output_json(&received_string)
     }
 
-    pub async fn new() -> Option<Self> {
+    pub async fn new() -> Result<Self, XtbError> {
         match TcpStream::connect((DEFAULT_XAPI_ADDRESS, DEFAULT_XAPI_PORT)).await {
             Ok(tcp_client) => {
                 let tls_connector = TlsConnector::new();
                 match tls_connector.connect(DEFAULT_XAPI_ADDRESS, tcp_client).await {
-                    Ok(tls_client) => return Option::Some(XtbConnection { tls_client: tls_client }),
-                    Err(_) => return Option::None,
+                    Ok(tls_client) => return Ok(XtbConnection { tls_client: tls_client }),
+                    Err(_) => return Err(XtbError::FailedToConnect),
                 }
             },
-            Err(_) => return Option::None,
+            Err(_) => return Err(XtbError::FailedToConnect),
         }
     }
 
